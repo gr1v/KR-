@@ -28,6 +28,9 @@ Minimax loss для состязательного обучения
 
  6. Графики loss кривых
 
+
+# Код по блокам
+
 ИМПОРТ БИБЛИОТЕК
 ```python
 import tensorflow as tf
