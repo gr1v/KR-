@@ -2,60 +2,379 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 import numpy as np
+import json
 import matplotlib.pyplot as plt
+import pandas as pd
 from datetime import datetime
 
 # ============================================================================
-# 1. GENERATOR - Генератор изображений
+# КЛАСС GAN
 # ============================================================================
 
-class Generator(keras.Model):
-    """
-    Генератор преобразует случайный шум в реалистичные изображения цифр.
-    
-    Архитектура:
-    - Dense слои для расширения латентного вектора
-    - Reshape для преобразования в тензор
-    - Conv2DTranspose для увеличения разрешения
-    - BatchNormalization для стабилизации обучения
-    """
+class GAN:
+    """Generative Adversarial Network для MNIST"""
     
     def __init__(self, latent_dim=100):
-        super(Generator, self).__init__()
         self.latent_dim = latent_dim
+        self.generator = self._build_generator()
+        self.discriminator = self._build_discriminator()
+        self.loss_fn = keras.losses.BinaryCrossentropy(from_logits=False)
         
-        # Плотные слои для обработки шума
-        self.dense1 = layers.Dense(256)
-        self.bn1 = layers.BatchNormalization()
+        self.g_optimizer = keras.optimizers.Adam(learning_rate=0.0002, beta_1=0.5)
+        self.d_optimizer = keras.optimizers.Adam(learning_rate=0.0002, beta_1=0.5)
         
-        self.dense2 = layers.Dense(512)
-        self.bn2 = layers.BatchNormalization()
+        self.d_losses = []
+        self.g_losses = []
+    
+    def _build_generator(self):
+        """ИСПРАВЛЕННЫЙ генератор - создает 28×28×1"""
+        model = keras.Sequential([
+            layers.Input(shape=(self.latent_dim,)),
+            
+            # Dense слои
+            layers.Dense(256),
+            layers.BatchNormalization(),
+            layers.ReLU(),
+            
+            layers.Dense(512),
+            layers.BatchNormalization(),
+            layers.ReLU(),
+            
+            layers.Dense(1024),
+            layers.BatchNormalization(),
+            layers.ReLU(),
+            
+            # Reshape в 7×7
+            layers.Dense(7*7*64),
+            layers.BatchNormalization(),
+            layers.Reshape((7, 7, 64)),
+            
+            # Upsampling слои
+            layers.Conv2DTranspose(32, kernel_size=(4, 4), strides=(2, 2), padding='same'),
+            layers.BatchNormalization(),
+            layers.ReLU(),
+            
+            layers.Conv2DTranspose(1, kernel_size=(4, 4), strides=(2, 2), padding='same'),
+            layers.Activation('tanh')
+        ])
+        return model
+    
+    def _build_discriminator(self):
+        """ИСПРАВЛЕННЫЙ дискриминатор - принимает 28×28×1"""
+        model = keras.Sequential([
+            layers.Input(shape=(28, 28, 1)),
+            
+            layers.Conv2D(32, (3, 3), padding='same'),
+            layers.LeakyReLU(alpha=0.2),
+            layers.MaxPooling2D((2, 2)),
+            
+            layers.Conv2D(64, (3, 3), padding='same'),
+            layers.BatchNormalization(),
+            layers.LeakyReLU(alpha=0.2),
+            layers.MaxPooling2D((2, 2)),
+            
+            layers.Conv2D(128, (3, 3), padding='same'),
+            layers.BatchNormalization(),
+            layers.LeakyReLU(alpha=0.2),
+            
+            layers.Flatten(),
+            layers.Dense(512),
+            layers.LeakyReLU(alpha=0.2),
+            layers.Dropout(0.3),
+            layers.Dense(1, activation='sigmoid')
+        ])
+        return model
+    
+    def verify_shapes(self):
+        """Проверить размеры ДО обучения"""
+        print("\n📏 ПРОВЕРКА РАЗМЕРОВ:")
+        print("=" * 60)
         
-        self.dense3 = layers.Dense(1024)
-        self.bn3 = layers.BatchNormalization()
+        test_noise = tf.random.normal([1, self.latent_dim])
+        gen_output = self.generator(test_noise, training=False)
         
-        self.dense4 = layers.Dense(28 * 28 * 1)
+        print(f"✓ Generator input:  (1, {self.latent_dim})")
+        print(f"✓ Generator output: {gen_output.shape}")
         
-        # Conv2DTranspose для увеличения разрешения (7x7 -> 28x28)
-        self.conv_transpose1 = layers.Conv2DTranspose(
-            filters=64,
-            kernel_size=4,
-            strides=2,
-            padding='same'
+        if gen_output.shape != (1, 28, 28, 1):
+            print(f"❌ ОШИБКА! Generator должен выводить (1, 28, 28, 1)")
+            return False
+        
+        disc_output = self.discriminator(gen_output, training=False)
+        
+        print(f"✓ Discriminator input:  {gen_output.shape}")
+        print(f"✓ Discriminator output: {disc_output.shape}")
+        
+        if disc_output.shape != (1, 1):
+            print(f"❌ ОШИБКА! Discriminator должен выводить (1, 1)")
+            return False
+        
+        print("=" * 60)
+        print("✅ ВСЕ РАЗМЕРЫ ПРАВИЛЬНЫЕ!\n")
+        return True
+    
+    @tf.function
+    def train_step(self, real_images):
+        batch_size = tf.shape(real_images)[0]
+        
+        # Обучаем Discriminator
+        with tf.GradientTape() as tape:
+            noise = tf.random.normal([batch_size, self.latent_dim])
+            fake_images = self.generator(noise, training=True)
+            
+            real_predictions = self.discriminator(real_images, training=True)
+            fake_predictions = self.discriminator(fake_images, training=True)
+            
+            real_loss = self.loss_fn(tf.ones_like(real_predictions), real_predictions)
+            fake_loss = self.loss_fn(tf.zeros_like(fake_predictions), fake_predictions)
+            d_loss = real_loss + fake_loss
+        
+        d_gradients = tape.gradient(d_loss, self.discriminator.trainable_weights)
+        self.d_optimizer.apply_gradients(
+            zip(d_gradients, self.discriminator.trainable_weights)
         )
-        self.bn4 = layers.BatchNormalization()
         
-        self.conv_transpose2 = layers.Conv2DTranspose(
-            filters=32,
-            kernel_size=4,
-            strides=2,
-            padding='same'
+        # Обучаем Generator
+        with tf.GradientTape() as tape:
+            noise = tf.random.normal([batch_size, self.latent_dim])
+            fake_images = self.generator(noise, training=True)
+            fake_predictions = self.discriminator(fake_images, training=True)
+            g_loss = self.loss_fn(tf.ones_like(fake_predictions), fake_predictions)
+        
+        g_gradients = tape.gradient(g_loss, self.generator.trainable_weights)
+        self.g_optimizer.apply_gradients(
+            zip(g_gradients, self.generator.trainable_weights)
         )
-        self.bn5 = layers.BatchNormalization()
         
-        self.conv_transpose3 = layers.Conv2DTranspose(
-            filters=1,
-            kernel_size=4,
-            strides=1,
-            padding='same',
-         
+        return d_loss, g_loss
+    
+    def train(self, X_train, epochs=50, batch_size=128):
+        """Цикл обучения"""
+        train_dataset = tf.data.Dataset.from_tensor_slices(X_train)
+        train_dataset = train_dataset.shuffle(buffer_size=10000)
+        train_dataset = train_dataset.batch(batch_size)
+        
+        print("=" * 70)
+        print("🚀 ЗАПУСК ОБУЧЕНИЯ GAN")
+        print("=" * 70)
+        print(f"📊 Параметры:")
+        print(f"   • Эпохи: {epochs}")
+        print(f"   • Batch size: {batch_size}")
+        print(f"   • Датасет: {len(X_train)} изображений")
+        print("=" * 70)
+        
+        for epoch in range(epochs):
+            epoch_d_loss = []
+            epoch_g_loss = []
+            
+            for real_images in train_dataset:
+                d_loss, g_loss = self.train_step(real_images)
+                epoch_d_loss.append(float(d_loss))
+                epoch_g_loss.append(float(g_loss))
+            
+            avg_d_loss = np.mean(epoch_d_loss)
+            avg_g_loss = np.mean(epoch_g_loss)
+            
+            self.d_losses.append(avg_d_loss)
+            self.g_losses.append(avg_g_loss)
+            
+            if (epoch + 1) % 5 == 0 or epoch == 0:
+                print(f"Epoch {epoch+1:3d}/{epochs} - D Loss: {avg_d_loss:.4f}, G Loss: {avg_g_loss:.4f}")
+        
+        print("=" * 70)
+        print("✅ ОБУЧЕНИЕ ЗАВЕРШЕНО!")
+        print("=" * 70)
+    
+    def generate_images(self, num_images=10):
+        noise = tf.random.normal([num_images, self.latent_dim])
+        return self.generator(noise, training=False)
+    
+    def export_results(self, filename='gan_results.json'):
+        results = {
+            'epochs': len(self.d_losses),
+            'd_losses': [float(x) for x in self.d_losses],
+            'g_losses': [float(x) for x in self.g_losses],
+            'learning_rate': 0.0002,
+            'batch_size': 128,
+            'dataset_size': 10000,
+            'timestamp': datetime.now().isoformat()
+        }
+        with open(filename, 'w') as f:
+            json.dump(results, f, indent=2)
+        print(f"✅ Результаты сохранены в {filename}")
+    
+    def save_models(self):
+        self.generator.save('generator.h5')
+        self.discriminator.save('discriminator.h5')
+        print("✅ Модели сохранены: generator.h5, discriminator.h5")
+
+
+# ============================================================================
+# ФУНКЦИИ ВИЗУАЛИЗАЦИИ
+# ============================================================================
+
+def plot_losses(d_losses, g_losses):
+    """📊 Построить графики потерь обучения"""
+    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+    fig.suptitle('GAN Training Analysis', fontsize=16, fontweight='bold')
+    
+    # График 1: Raw D Loss
+    ax = axes[0, 0]
+    ax.plot(d_losses, label='Discriminator Loss', color='#FF6B6B', linewidth=2)
+    ax.set_xlabel('Epoch', fontsize=11)
+    ax.set_ylabel('Loss', fontsize=11)
+    ax.set_title('Discriminator Loss (Raw)', fontsize=12, fontweight='bold')
+    ax.grid(True, alpha=0.3, linestyle='--')
+    ax.legend(fontsize=10)
+    
+    # График 2: Raw G Loss
+    ax = axes[0, 1]
+    ax.plot(g_losses, label='Generator Loss', color='#4ECDC4', linewidth=2)
+    ax.set_xlabel('Epoch', fontsize=11)
+    ax.set_ylabel('Loss', fontsize=11)
+    ax.set_title('Generator Loss (Raw)', fontsize=12, fontweight='bold')
+    ax.grid(True, alpha=0.3, linestyle='--')
+    ax.legend(fontsize=10)
+    
+    # График 3: Smoothed Losses
+    ax = axes[1, 0]
+    window = max(3, len(d_losses) // 10)
+    d_smooth = pd.Series(d_losses).rolling(window=window, center=True).mean()
+    g_smooth = pd.Series(g_losses).rolling(window=window, center=True).mean()
+    
+    ax.plot(d_smooth, label='D Loss (Smoothed)', color='#FF6B6B', linewidth=2.5)
+    ax.plot(g_smooth, label='G Loss (Smoothed)', color='#4ECDC4', linewidth=2.5)
+    ax.set_xlabel('Epoch', fontsize=11)
+    ax.set_ylabel('Loss', fontsize=11)
+    ax.set_title('Both Losses (Smoothed)', fontsize=12, fontweight='bold')
+    ax.grid(True, alpha=0.3, linestyle='--')
+    ax.legend(fontsize=10)
+    
+    # График 4: Статистика
+    ax = axes[1, 1]
+    ax.axis('off')
+    
+    d_improvement = ((d_losses[-1] - d_losses[0]) / d_losses[0] * 100)
+    g_improvement = ((g_losses[-1] - g_losses[0]) / g_losses[0] * 100)
+    
+    stats_text = f"""
+📊 TRAINING STATISTICS
+
+Discriminator Loss:
+  • Initial: {d_losses[0]:.4f}
+  • Final:   {d_losses[-1]:.4f}
+  • Average: {sum(d_losses)/len(d_losses):.4f}
+  • Min:     {min(d_losses):.4f}
+  • Max:     {max(d_losses):.4f}
+
+Generator Loss:
+  • Initial: {g_losses[0]:.4f}
+  • Final:   {g_losses[-1]:.4f}
+  • Average: {sum(g_losses)/len(g_losses):.4f}
+  • Min:     {min(g_losses):.4f}
+  • Max:     {max(g_losses):.4f}
+
+Improvement:
+  • D Loss:  {d_improvement:+.1f}%
+  • G Loss:  {g_improvement:+.1f}%
+  • Epochs:  {len(d_losses)}
+"""
+    
+    ax.text(0.1, 0.5, stats_text, fontsize=11, family='monospace',
+            verticalalignment='center', bbox=dict(boxstyle='round', 
+            facecolor='wheat', alpha=0.3))
+    
+    plt.tight_layout()
+    plt.savefig('gan_training_loss.png', dpi=150, bbox_inches='tight')
+    print("✅ Loss graph saved to gan_training_loss.png")
+    plt.show()
+
+
+def plot_generated_samples(gan, num_samples=16):
+    """🎨 Показать сгенерированные цифры"""
+    fig, axes = plt.subplots(4, 4, figsize=(10, 10))
+    fig.suptitle('Generated MNIST Digits', fontsize=14, fontweight='bold')
+    
+    generated = gan.generate_images(num_samples)
+    generated = (generated.numpy() + 1) / 2
+    
+    for i, ax in enumerate(axes.flat):
+        ax.imshow(generated[i].reshape(28, 28), cmap='gray')
+        ax.axis('off')
+    
+    plt.tight_layout()
+    plt.savefig('generated_samples.png', dpi=150, bbox_inches='tight')
+    print("✅ Generated samples saved to generated_samples.png")
+    plt.show()
+
+
+# ============================================================================
+# ЗАГРУЗКА ДАННЫХ
+# ============================================================================
+
+def load_and_preprocess_mnist():
+    print("📊 Загрузка MNIST датасета...")
+    (X_train, _), _ = keras.datasets.mnist.load_data()
+    X_train = X_train.astype(np.float32) / 127.5 - 1.0
+    X_train = np.expand_dims(X_train, axis=-1)
+    print(f"✅ Данные загружены: {X_train.shape}\n")
+    return X_train
+
+
+# ============================================================================
+# ГЛАВНАЯ ПРОГРАММА
+# ============================================================================
+
+if __name__ == "__main__":
+    print("\n")
+    print("╔" + "=" * 68 + "╗")
+    print("║" + " " * 15 + "🤖 GAN для MNIST с ГРАФИКАМИ! 🤖" + " " * 21 + "║")
+    print("╚" + "=" * 68 + "╝")
+    print()
+    
+    # Загрузить данные
+    X_train = load_and_preprocess_mnist()
+    
+    # Создать GAN
+    print("🏗️ Создание GAN...")
+    gan = GAN(latent_dim=100)
+    
+    # Проверить размеры
+    if not gan.verify_shapes():
+        print("❌ ОШИБКА В АРХИТЕКТУРЕ!")
+        exit(1)
+    
+    # Обучить
+    print("🚀 Начинаем обучение...\n")
+    gan.train(X_train[:10000], epochs=50, batch_size=128)
+    
+    # Сохранить результаты
+    print("\n💾 Сохранение результатов...")
+    gan.export_results('gan_results.json')
+    gan.save_models()
+    
+    # 📊 ГРАФИКИ!
+    print("\n" + "=" * 70)
+    print("📈 ПОСТРОЕНИЕ ГРАФИКОВ")
+    print("=" * 70)
+    
+    # График потерь
+    print("\n1️⃣ Графики потерь обучения...")
+    plot_losses(gan.d_losses, gan.g_losses)
+    
+    # Сгенерированные цифры
+    print("\n2️⃣ Сгенерированные цифры...")
+    plot_generated_samples(gan, num_samples=16)
+    
+    # Итоговая статистика
+    print("\n" + "=" * 70)
+    print("✅ ОБУЧЕНИЕ И ВИЗУАЛИЗАЦИЯ ЗАВЕРШЕНЫ!")
+    print("=" * 70)
+    print("\n📁 Созданные файлы:")
+    print("  ✓ gan_results.json - результаты обучения")
+    print("  ✓ gan_training_loss.png - графики потерь 📊")
+    print("  ✓ generated_samples.png - сгенерированные цифры 🎨")
+    print("  ✓ generator.h5 - модель генератора")
+    print("  ✓ discriminator.h5 - модель дискриминатора")
+    print("\n✨ Загрузите gan_results.json в GAN_Browser_App.html для веб-визуализации!")
+    print("=" * 70)
