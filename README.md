@@ -1,4 +1,4 @@
-[GAN_blocks.md](https://github.com/user-attachments/files/24154385/GAN_blocks.md)Задание 8: GAN для генерации изображений
+Задание 8: GAN для генерации изображений
 =
 ### Задача: создать Generative Adversarial Network для синтеза изображений цифр.
 
